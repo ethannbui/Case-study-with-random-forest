@@ -1,0 +1,414 @@
+---
+title: "projectfinal tree classification"
+author: "ThuanBui"
+date: "2025-04-29"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load data
+
+```{r}
+# Read the data
+df <- read.csv("CharlesBookClub.csv", header = TRUE)
+
+# Drop columns 1 and 2 (Seq# and ID#), and also the last five columns (yes and noflorence)
+df <- df[, -c(1:2, (ncol(df)-4):ncol(df))]
+
+# Convert Florence to factor for classification
+df$Florence <- as.factor(df$Florence)
+
+# Build and plot the tree
+library(rpart)
+library(rpart.plot)
+library(caret)
+
+# View first few rows
+head(df)
+```
+Data patrition
+
+```{r}
+set.seed(6210)
+train.index <- sample(rownames(df), 0.6*nrow(df))
+valid.index <- setdiff(rownames(df), train.index)
+
+train.df <- df[train.index, ]
+valid.df <- df[valid.index, ]
+
+```
+
+Default classification tree and its confusion matrix (without adjustment)
+
+```{r}
+# Train the tree
+default.ct <- rpart(Florence ~ ., data = train.df, method = "class")
+
+# Predict on validation set (NOT training set)
+default.ct.point.pred.valid <- predict(default.ct, valid.df, type = "class")
+
+# Compare prediction to true validation labels
+confusionMatrix(default.ct.point.pred.valid, as.factor(valid.df$Florence), positive = "1")
+
+# Comment: this one fail because of sensitivity is 0
+
+```
+
+Classification tree with cutoff and its confusion matrix
+
+```{r}
+# Train the tree
+default.ct <- rpart(Florence ~ ., data = train.df, method = "class")
+
+# Get predicted probabilities (for class "1")
+default.ct.probs.valid <- predict(default.ct, valid.df, type = "prob")[,2]
+
+# Apply custom cutoff = 0.2
+default.ct.pred.valid <- ifelse(default.ct.probs.valid > 0.2, "1", "0")
+
+# Convert to factor to match true labels
+default.ct.pred.valid <- factor(default.ct.pred.valid, levels = c("0", "1"))
+
+# Compare prediction to true validation labels
+confusionMatrix(default.ct.pred.valid, as.factor(valid.df$Florence), positive = "1")
+
+# Comment: this one fail because of sensitivity is 0
+```
+
+best prune tree with cutoff and its confusion matrix
+
+```{r}
+set.seed(1)
+cv.ct <- rpart(Florence ~ ., data = train.df, method = "class", cp = 0.00001, minsplit = 1, xval = 5)  
+printcp(cv.ct) 
+
+```
+```{r}
+pruned.ct <- prune(cv.ct, cp = 0.0080906)
+prp(pruned.ct, type = 1, extra = 1, under = TRUE, split.font = 1, varlen = -10, 
+    box.col=ifelse(pruned.ct$frame$var == "<leaf>", 'gray', 'white'))
+
+
+library(caret)
+# Predict probabilities on validation set
+default.ct.probs.valid <- predict(pruned.ct, valid.df, type = "prob")[,2]  # Probability for class "1"
+
+# Apply custom threshold
+default.ct.point.pred.valid <- ifelse(default.ct.probs.valid > 0.2, "1", "0")
+default.ct.point.pred.valid <- factor(default.ct.point.pred.valid, levels = c("0", "1"))
+
+# Evaluate
+conf_matrix <- confusionMatrix(default.ct.point.pred.valid, as.factor(valid.df$Florence), positive = "1")
+print(conf_matrix)
+
+
+# Predict probabilities on training set
+default.ct.probs.train <- predict(pruned.ct, train.df, type = "prob")[,2]
+
+# Apply custom threshold
+default.ct.point.pred.train <- ifelse(default.ct.probs.train > 0.2, "1", "0")
+default.ct.point.pred.train <- factor(default.ct.point.pred.train, levels = c("0", "1"))
+
+# Evaluate
+conf_matrix <- confusionMatrix(default.ct.point.pred.train, as.factor(train.df$Florence), positive = "1")
+print(conf_matrix)
+
+
+```
+
+
+Lift chart
+
+```{r}
+library(gains)
+
+# Convert Florence to numeric (0 = no, 1 = yes)
+florence.numeric <- as.numeric(as.character(valid.df$Florence))
+
+# Use probabilities from pruned classification tree
+rf.gains <- gains(florence.numeric, default.ct.probs.valid)
+
+# Plot lift chart
+plot(c(0, rf.gains$cume.pct.of.total*sum(florence.numeric)) ~ c(0, rf.gains$cume.obs),
+     xlab = "Number of customers contacted", 
+     ylab = "Cumulative Purchasers", 
+     main = "Lift Chart for Pruned Classification Tree", 
+     type = "l")
+
+# Add baseline (random model)
+lines(c(0, sum(florence.numeric)) ~ c(0, nrow(valid.df)), lty = 2)
+
+
+```
+Profit chart
+
+```{r}
+
+df <- data.frame(prob = default.ct.probs.valid,
+                 actual = as.numeric(as.character(valid.df$Florence)))
+df <- df[order(-df$prob), ]
+
+
+df$profit <- ifelse(df$actual == 1, 10 - 1, -1)  # +9 if buyer, -1 if not
+df$cum_profit <- cumsum(df$profit)
+
+max_profit <- max(df$cum_profit)
+max_index <- which.max(df$cum_profit)
+
+
+library(ggplot2)
+ggplot(df, aes(x = 1:nrow(df), y = cum_profit)) +
+  geom_line(color = "darkgreen") +
+  geom_vline(xintercept = max_index, linetype = "dashed", color = "red") +
+  annotate("text", x = max_index, y = max_profit + 15, 
+           label = paste("Max Profit: $", max_profit), color = "red") +
+  labs(title = "Profit Curve with Optimal Mailing Cutoff",
+       x = "Customers (ranked by score)",
+       y = "Cumulative Profit ($)") +
+  theme_minimal()
+
+```
+
+
+```{r}
+max_index <- which.max(df$cum_profit)
+best_cutoff <- df$prob[max_index]
+print(best_cutoff)
+```
+
+
+
+
+Pune + weight
+```{r}
+library(rpart)
+library(rpart.plot)
+library(caret)
+
+# Set custom class weights
+classwt <- c("0" = 1, "1" = 5.9)
+
+# Train a classification tree with custom weights
+ct <- rpart(Florence ~ ., data = train.df,
+            method = "class",
+            control = rpart.control(cp = 0.001),  # grow full tree
+            weights = ifelse(train.df$Florence == 1, classwt["1"], classwt["0"]))
+
+# Find best cp from cross-validation
+cp_table <- printcp(ct)
+best_cp <- cp_table[which.min(cp_table[,"xerror"]), "CP"]
+
+# Prune the tree
+pruned_ct <- prune(ct, cp = best_cp)
+
+# Plot the pruned tree
+prp(pruned_ct, type = 1, extra = 1, under = TRUE, split.font = 1, varlen = -10,
+    box.col = ifelse(pruned_ct$frame$var == "<leaf>", 'gray', 'white'))
+
+# Predict on validation set (probability of class "1")
+probs <- predict(pruned_ct, valid.df, type = "prob")[,2]
+
+# Apply cutoff of 0.2
+preds <- ifelse(probs > 0.2, "1", "0")
+preds <- factor(preds, levels = c("0", "1"))
+
+# Evaluate with confusion matrix
+conf_matrix <- confusionMatrix(preds, as.factor(valid.df$Florence), positive = "1")
+print(conf_matrix)
+
+```
+
+
+CASE WITH SELECTED PREDICTORS
+```{r}
+cv.ct <- rpart(Florence ~ ., 
+               data = train.df[, c(2:5, which(names(train.df) == "Florence"))], 
+               method = "class", 
+               cp = 0.00001, 
+               minsplit = 1, 
+               xval = 5)
+printcp(cv.ct)
+default.ct.point.pred.valid <- predict(cv.ct, valid.df, type = "class")
+conf_matrix <- confusionMatrix(default.ct.point.pred.valid, as.factor(valid.df$Florence), positive = "1")
+conf_matrix
+
+# Comment: this one fail because of overfitting 
+```
+Check overfitting
+
+```{r}
+
+default.ct.point.pred.train <- predict(cv.ct, train.df, type = "class")
+conf_matrix <- confusionMatrix(default.ct.point.pred.train, as.factor(train.df$Florence), positive = "1")
+conf_matrix
+```
+
+
+Random forest
+
+Randomn forest with 4 predictor cutoff = 0.2, weight 2:8
+
+```{r}
+library(randomForest)
+rf <- randomForest(Florence ~ ., data = train.df, 
+                   ntree = 500, 
+                   mtry = 4,
+                   classwt = c('0' = 0.2, '1' = 0.8),
+                   nodesize = 10)  # More weight to buyers
+rf.probs <- predict(rf, valid.df, type = "prob")[,2]
+rf.pred <- ifelse(rf.probs > 0.2, "1", "0")
+rf.pred <- factor(rf.pred, levels = c("0", "1"))
+confusionMatrix(rf.pred, valid.df$Florence, positive = "1")
+
+# Comment: very low accurancy that lower and 50% and overfit
+```
+check overfit
+ 
+```{r}
+library(randomForest)
+rf.probs <- predict(rf, train.df, type = "prob")[,2]
+rf.pred <- ifelse(rf.probs > 0.2, "1", "0")
+rf.pred <- factor(rf.pred, levels = c("0", "1"))
+confusionMatrix(rf.pred, train.df$Florence, positive = "1")
+```
+
+
+
+Random forest with 4 but no cutoff
+
+```{r}
+library(randomForest)
+rf4 <- randomForest(as.factor(Florence) ~ ., data = train.df, ntree = 500, 
+                   mtry = 4, nodesize = 10, importance = TRUE)  
+varImpPlot(rf4, type = 1)
+
+rf.probs <- predict(rf4, valid.df, type = "prob")[,2]
+rf.pred <- ifelse(rf.probs > 0.5, "1", "0")
+rf.pred <- factor(rf.pred, levels = c("0", "1"))
+confusionMatrix(rf.pred, valid.df$Florence, positive = "1")
+
+# Comment: this one fail because of sensitivity is 0
+```
+
+
+
+Random forest with 4 predictors cutoff
+
+
+```{r}
+library(randomForest)
+rf4 <- randomForest(as.factor(Florence) ~ ., data = train.df, ntree = 500, 
+                   mtry = 4, nodesize = 10, importance = TRUE)  
+varImpPlot(rf4, type = 1)
+
+rf.probs <- predict(rf4, valid.df, type = "prob")[,2]
+rf.pred <- ifelse(rf.probs > 0.2, "1", "0")
+rf.pred <- factor(rf.pred, levels = c("0", "1"))
+confusionMatrix(rf.pred, valid.df$Florence, positive = "1")
+
+# Comment: this one fail because of overfitting
+```
+Check overfit
+
+```{r}
+library(randomForest)
+
+rf.probs <- predict(rf4, train.df, type = "prob")[,2]
+rf.pred <- ifelse(rf.probs > 0.2, "1", "0")
+rf.pred <- factor(rf.pred, levels = c("0", "1"))
+confusionMatrix(rf.pred, train.df$Florence, positive = "1")
+```
+
+
+Random forest with 5 predictors
+
+
+
+```{r}
+
+library(randomForest)
+rf5 <- randomForest(as.factor(Florence) ~ ., data = train.df, ntree = 500, 
+                   mtry = 5, nodesize = 10, importance = TRUE)  
+
+varImpPlot(rf5, type = 1)
+
+rf.probs <- predict(rf5, valid.df, type = "prob")[,2]
+rf.pred <- ifelse(rf.probs > 0.2, "1", "0")
+rf.pred <- factor(rf.pred, levels = c("0", "1"))
+confusionMatrix(rf.pred, valid.df$Florence, positive = "1")
+# Comment: this one fail because of overfitting
+
+```
+
+Check overfit
+```{r}
+library(randomForest)
+
+rf.probs <- predict(rf5, train.df, type = "prob")[,2]
+rf.pred <- ifelse(rf.probs > 0.2, "1", "0")
+rf.pred <- factor(rf.pred, levels = c("0", "1"))
+confusionMatrix(rf.pred, train.df$Florence, positive = "1")
+```
+With 5 predictor classweight
+
+```{r}
+library(randomForest)
+rf5 <- randomForest(as.factor(Florence) ~ ., data = train.df, ntree = 500, 
+                   mtry = 5,classwt = c('0' = 0.4, '1' = 0.6), nodesize = 10, importance = TRUE)  
+
+varImpPlot(rf5, type = 1)
+
+rf.probs <- predict(rf5, valid.df, type = "prob")[,2]
+rf.pred <- ifelse(rf.probs > 0.2, "1", "0")
+rf.pred <- factor(rf.pred, levels = c("0", "1"))
+confusionMatrix(rf.pred, valid.df$Florence, positive = "1")
+
+
+rf.probs <- predict(rf5, train.df, type = "prob")[,2]
+rf.pred <- ifelse(rf.probs > 0.2, "1", "0")
+rf.pred <- factor(rf.pred, levels = c("0", "1"))
+confusionMatrix(rf.pred, train.df$Florence, positive = "1")
+# Comment: this one fail because of overfitting
+```
+
+
+
+
+
+
+Random forest with 6 predictors
+
+```{r}
+library(randomForest)
+rf6 <- randomForest(as.factor(Florence) ~ ., data = train.df, ntree = 500, 
+                   mtry = 6, nodesize = 10, importance = TRUE)  
+
+varImpPlot(rf6, type = 1)
+
+
+rf.probs <- predict(rf6, valid.df, type = "prob")[,2]
+rf.pred <- ifelse(rf.probs > 0.2, "1", "0")
+rf.pred <- factor(rf.pred, levels = c("0", "1"))
+confusionMatrix(rf.pred, valid.df$Florence, positive = "1")
+# Comment: this one fail because of overfitting
+```
+check overfitting
+
+```{r}
+rf.probs <- predict(rf6, train.df, type = "prob")[,2]
+rf.pred <- ifelse(rf.probs > 0.2, "1", "0")
+rf.pred <- factor(rf.pred, levels = c("0", "1"))
+confusionMatrix(rf.pred, train.df$Florence, positive = "1")
+```
+
+
+
+
+
+
