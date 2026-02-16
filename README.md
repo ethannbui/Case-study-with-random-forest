@@ -1,5 +1,4 @@
 # Case-study-with-random-forest
-# Charles Book Club — Tree Classification & Random Forest (Florence Offer)
 
 This project uses the **Charles Book Club** case study to build predictive models that help the club **target customers most likely to buy the “Florence” offer**, reducing wasted mailings while minimizing misclassification (false positives vs. false negatives).
 
